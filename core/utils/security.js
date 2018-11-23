@@ -1,191 +1,263 @@
 'use strict';
-var bcrypt = require('bcryptjs');
-var crypto = require('crypto');
-var fs = require('fs');
 var Promise = require('bluebird');
-var qetag = require('../utils/qetag');
+var models = require('../../models');
 var _ = require('lodash');
-var log4js = require('log4js');
-var log = log4js.getLogger("cps:utils:security");
+var validator = require('validator');
+var security = require('../utils/security');
+var factory = require('../utils/factory');
+var moment = require('moment');
+var EmailManager = require('./email-manager');
+var config = require('../config');
 var AppError = require('../app-error');
+var log4js = require('log4js');
+var log = log4js.getLogger("cps:AccountManager");
 
-var randToken = require('rand-token').generator({
-    chars: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
-    source: crypto.randomBytes
-});
-var security = {};
-module.exports = security;
+var proto = module.exports = function (){
+  function AccountManager() {
 
-security.md5 = function (str) {
-    var md5sum = crypto.createHash('md5');
-    md5sum.update(str);
-    str = md5sum.digest('hex');
-    return str;
-}
+  }
+  AccountManager.__proto__ = proto;
+  return AccountManager;
+};
 
-security.passwordHashSync = function (password) {
-    return bcrypt.hashSync(password, bcrypt.genSaltSync(12));
-}
-
-security.passwordVerifySync = function (password, hash) {
-    return bcrypt.compareSync(password, hash)
-}
-
-security.randToken = function (num) {
-    return randToken.generate(num);
-}
-
-security.parseToken = function (token) {
-    return {
-        identical: token.substr(-9, 9),
-        token: token.substr(0, 28)
+proto.collaboratorCan = function(uid, appName) {
+  return this.getCollaborator(uid, appName)
+  .then((data) => {
+    if (!data) {
+      log.debug(`collaboratorCan App ${appName} not exists.`);
+      throw new AppError.AppError(`App ${appName} not exists.`);
     }
-}
+    log.debug('collaboratorCan yes');
+    return data;
+  });
+};
 
-security.fileSha256 = function (file) {
-    return new Promise((resolve, reject) => {
-        var rs = fs.createReadStream(file);
-        var hash = crypto.createHash('sha256');
-        rs.on('data', hash.update.bind(hash));
-        rs.on('error', (e) => {
-            reject(e);
-        });
-        rs.on('end', () => {
-            resolve(hash.digest('hex'));
-        });
+proto.ownerCan = function(uid, appName) {
+  return this.getCollaborator(uid, appName)
+  .then((data) => {
+    if (!data) {
+      log.debug(`ownerCan App ${appName} not exists.`);
+      throw new AppError.AppError(`App ${appName} not exists.`);
+    }
+    if (!_.eq(_.get(data,'roles'), 'Owner') ) {
+      log.debug(`ownerCan Permission Deny, You are not owner!`);
+      throw new AppError.AppError("Permission Deny, You are not owner!");
+    }
+    return data;
+  });
+};
+
+proto.getCollaborator = function (uid, appName) {
+  return models.Collaborators.findByAppNameAndUid(uid, appName);
+};
+
+proto.findUserByEmail = function (email) {
+  return models.Users.findOne({where: {email: email}})
+  .then((data) => {
+    if (_.isEmpty(data)) {
+      throw new AppError.AppError(email + " does not exist.");
+    } else {
+      return data;
+    }
+  });
+};
+
+proto.getAllAccessKeyByUid = function (uid) {
+  return models.UserTokens.findAll({where: {uid: uid}, order:[['id', 'DESC']]})
+  .then((tokens) => {
+    return _.map(tokens, function(v){
+      return {
+        name: '(hidden)',
+        createdTime: parseInt(moment(v.created_at).format('x')),
+        createdBy: v.created_by,
+        expires: parseInt(moment(v.expires_at).format('x')),
+        friendlyName: v.name,
+        description: v.description,
+      };
     });
-}
+  });
+};
 
-security.stringSha256Sync = function (contents) {
-    var sha256 = crypto.createHash('sha256');
-    sha256.update(contents);
-    return sha256.digest('hex');
-}
+proto.isExsitAccessKeyName = function (uid, friendlyName) {
+  return models.UserTokens.findOne({
+    where: {uid: uid, name: friendlyName}
+  });
+};
 
-security.packageHashSync = function (jsonData) {
-    var sortedArr = security.sortJsonToArr(jsonData);
-    var manifestData = _.map(sortedArr, (v) => {
-        return v.path + ':' + v.hash;
-    });
-    log.debug('packageHashSync manifestData:', manifestData);
-    var manifestString = JSON.stringify(manifestData.sort());
-    manifestString = _.replace(manifestString, /\\\//g, '/');
-    log.debug('packageHashSync manifestString:', manifestData);
-    return security.stringSha256Sync(manifestString);
-}
+proto.createAccessKey = function (uid, newAccessKey, ttl, friendlyName, createdBy, description) {
+  return models.UserTokens.create({
+    uid: uid,
+    name: friendlyName,
+    tokens: newAccessKey,
+    description: description,
+    created_by: createdBy,
+    expires_at: moment().add(ttl/1000, 'seconds').format('YYYY-MM-DD HH:mm:ss'),
+    created_at: moment().format('YYYY-MM-DD HH:mm:ss'),
+  });
+};
 
-//参数为buffer或者readableStream或者文件路径
-security.qetag = function (buffer) {
-    if (typeof buffer === 'string') {
-        try {
-            log.debug(`Check upload file ${buffer} fs.R_OK`);
-            fs.accessSync(buffer, fs.R_OK);
-            log.debug(`Pass upload file ${buffer}`);
-        } catch (e) {
-            log.error(e);
-            return Promise.reject(new AppError.AppError(e.message))
+const LOGIN_LIMIT_PRE = 'LOGIN_LIMIT_PRE_';
+
+proto.login = function (account, password) {
+  if (_.isEmpty(account)) {
+    return Promise.reject(new AppError.AppError("请您输入邮箱地址"))
+  }
+  if (_.isEmpty(password)) {
+    return Promise.reject(new AppError.AppError("请您输入密码"))
+  }
+  var where = {};
+  if (validator.isEmail(account)) {
+    where = {email: account};
+  }else {
+    where = {username: account};
+  }
+  var tryLoginTimes = _.get(config, 'common.tryLoginTimes', 0);
+  return models.Users.findOne({where: where})
+  .then((users) => {
+    if (_.isEmpty(users)) {
+      throw new AppError.AppError("您输入的邮箱或密码有误");
+    }
+    return users;
+  })
+  .then((users) => {
+    if (tryLoginTimes > 0) {
+      var loginKey = `${LOGIN_LIMIT_PRE}${users.id}`;
+      var client = factory.getRedisClient("default");
+      return client.getAsync(loginKey)
+      .then((loginErrorTimes) => {
+        if (loginErrorTimes > tryLoginTimes) {
+          throw new AppError.AppError(`您输入密码错误次数超过限制，帐户已经锁定`);
         }
+        return users;
+      })
+      .finally(() => client.quit());
+    } else {
+      return users;
     }
-    log.debug(`generate file identical`)
-    return new Promise((resolve, reject) => {
-        qetag(buffer, (data) => {
-            log.debug('identical:', data);
-            resolve(data)
-        });
-    });
-}
-
-security.sha256AllFiles = function (files) {
-    return new Promise((resolve, reject) => {
-        var results = {};
-        var length = files.length;
-        var count = 0;
-        files.forEach((file) => {
-            security.fileSha256(file)
-                .then((hash) => {
-                    results[file] = hash;
-                    count++;
-                    if (count == length) {
-                        resolve(results);
-                    }
-                });
-        });
-    });
-}
-
-security.uploadPackageType = function (directoryPath) {
-    return new Promise((resolve, reject) => {
-        var recursive = require("recursive-readdir");
-        var path = require('path');
-        var slash = require("slash");
-        recursive(directoryPath, (err, files) => {
-            if (err) {
-                log.error(new AppError.AppError(err.message));
-                reject(new AppError.AppError(err.message));
-            } else {
-                if (files.length == 0) {
-                    log.debug(`uploadPackageType empty files`);
-                    reject(new AppError.AppError("empty files"));
-                } else {
-                    const AREGEX = /android\.bundle/
-                    const AREGEX_IOS = /main\.jsbundle/
-                    var packageType = 0;
-                    _.forIn(files, function (value) {
-                        if (AREGEX.test(value)) {
-                            packageType = 1;
-                            return false;
-                        }
-                        if (AREGEX_IOS.test(value)) {
-                            packageType = 2;
-                            return false;
-                        }
-                    });
-                    log.debug(`uploadPackageType packageType: ${packageType}`);
-                    resolve(packageType);
-                }
-            }
-        });
-    });
-}
-
-security.calcAllFileSha256 = function (directoryPath) {
-    return new Promise((resolve, reject) => {
-        var recursive = require("recursive-readdir");
-        var path = require('path');
-        var slash = require("slash");
-        recursive(directoryPath, (error, files) => {
-            if (error) {
-                log.error(error);
-                reject(new AppError.AppError(error.message));
-            } else {
-                if (files.length == 0) {
-                    log.debug(`calcAllFileSha256 empty files in directoryPath:`, directoryPath);
-                    reject(new AppError.AppError("empty files"));
-                } else {
-                    security.sha256AllFiles(files)
-                        .then((results) => {
-                            var data = {};
-                            _.forIn(results, (value, key) => {
-                                var relativePath = path.relative(directoryPath, key);
-                                relativePath = slash(relativePath);
-                                data[relativePath] = value;
-                            });
-                            log.debug(`calcAllFileSha256 files:`, data);
-                            resolve(data);
-                        });
-                }
-            }
-        });
-    });
-}
-
-security.sortJsonToArr = function (json) {
-    var rs = [];
-    _.forIn(json, (value, key) => {
-        rs.push({
-            path: key,
-            hash: value
+  })
+  .then((users) => {
+    if (!security.passwordVerifySync(password, users.password)) {
+      if (tryLoginTimes > 0) {
+        var loginKey = `${LOGIN_LIMIT_PRE}${users.id}`;
+        var client = factory.getRedisClient("default");
+        client.existsAsync(loginKey)
+        .then((isExists) => {
+          if (!isExists) {
+            var expires = moment().endOf('day').format('X') - moment().format('X');
+            return client.setexAsync(loginKey, expires, 0);
+          }
+          return isExists;
         })
-    });
-    return _.sortBy(rs, (o) => o.path);
+        .then(() => {
+          return client.incrAsync(loginKey);
+        })
+        .finally(() => client.quit());
+      }
+      throw new AppError.AppError("您输入的邮箱或密码有误");
+    } else {
+      return users;
+    }
+  });
+};
+
+const REGISTER_CODE = "REGISTER_CODE_";
+const EXPIRED = 1200;
+const EXPIRED_SPEED = 10;
+
+proto.sendRegisterCode = function (email) {
+  if (_.isEmpty(email)) {
+    return Promise.reject(new AppError.AppError("请您输入邮箱地址"));
+  }
+  return models.Users.findOne({where: {email: email}})
+  .then((u) => {
+    if (u) {
+      throw new AppError.AppError(`"${email}" 已经注册过，请更换邮箱注册`);
+    }
+  })
+  .then(() => {
+    //将token临时存储到redis
+    var token = security.randToken(40);
+    var client = factory.getRedisClient("default");
+    return client.setexAsync(`${REGISTER_CODE}${security.md5(email)}`, EXPIRED, token)
+    .then(() => {
+      return token;
+    })
+    .finally(() => client.quit());
+  })
+  .then((token) => {
+    //将token发送到用户邮箱
+    var emailManager = new EmailManager();
+    return emailManager.sendRegisterCode(email, token);
+  })
+};
+
+proto.checkRegisterCode = function (email, token) {
+  return models.Users.findOne({where: {email: email}})
+  .then((u) => {
+    if (u) {
+      throw new AppError.AppError(`"${email}" 已经注册过，请更换邮箱注册`);
+    }
+  })
+  .then(() => {
+    var registerKey = `${REGISTER_CODE}${security.md5(email)}`;
+    var client = factory.getRedisClient("default");
+    return client.getAsync(registerKey)
+    .then((storageToken) => {
+      if (_.isEmpty(storageToken)) {
+        throw new AppError.AppError(`验证码已经失效，请您重新获取`);
+      }
+      if (!_.eq(token, storageToken)) {
+        client.ttlAsync(registerKey)
+        .then((ttl) => {
+          if (ttl > 0) {
+            return client.expireAsync(registerKey, ttl - EXPIRED_SPEED);
+          }
+          return ttl;
+        })
+        .finally(() => client.quit());
+        throw new AppError.AppError(`您输入的验证码不正确，请重新输入`);
+      }
+      return storageToken;
+    })
+  })
 }
+
+proto.register = function (email, password) {
+  return models.Users.findOne({where: {email: email}})
+  .then((u) => {
+    if (u) {
+      throw new AppError.AppError(`"${email}" 已经注册过，请更换邮箱注册`);
+    }
+  })
+  .then(() => {
+    var identical = security.randToken(9);
+    return models.Users.create({
+      email: email,
+      password: security.passwordHashSync(password),
+      identical: identical
+    });
+  })
+}
+
+proto.changePassword = function (uid, oldPassword, newPassword) {
+  if (!_.isString(newPassword) || newPassword.length < 6) {
+    return Promise.reject(new AppError.AppError("请您输入6～20位长度的新密码"));
+  }
+  return models.Users.findOne({where: {id: uid}})
+  .then((u) => {
+    if (!u) {
+      throw new AppError.AppError(`未找到用户信息`);
+    }
+    return u;
+  })
+  .then((u) => {
+    var isEq = security.passwordVerifySync(oldPassword, u.get('password'));
+    if (!isEq) {
+      throw new AppError.AppError(`您输入的旧密码不正确，请重新输入`);
+    }
+    u.set('password', security.passwordHashSync(newPassword));
+    u.set('ack_code', security.randToken(5));
+    return u.save();
+  });
+};
+

@@ -176,10 +176,13 @@ describe('api/users/users.test.js', function() {
 
     it('should not change password successful when authToken invalid', function(done) {
       request.patch(`/users/password`)
+      .set('Authorization', `Basic 11345`)
       .send({oldPassword: password, newPassword: newPassword})
       .end(function(err, res) {
         should.not.exist(err);
-        res.status.should.equal(401);
+        var rs = JSON.parse(res.text);
+        res.status.should.equal(200);
+        rs.should.containEql({status:401});
         done();
       });
     });

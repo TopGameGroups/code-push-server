@@ -9,9 +9,79 @@ var validator = require('validator');
 var qiniu = require("qiniu");
 var common = {};
 var AppError = require('../app-error');
+var jschardet = require("jschardet");
 var log4js = require('log4js');
+var path = require('path');
 var log = log4js.getLogger("cps:utils:common");
 module.exports = common;
+
+common.detectIsTextFile = function(filePath) {
+  var fd = fs.openSync(filePath, 'r');
+  var buffer = new Buffer(4096);
+  fs.readSync(fd, buffer, 0, 4096, 0);
+  fs.closeSync(fd);
+  var rs = jschardet.detect(buffer);
+  log.debug('detectIsTextFile:', filePath, rs);
+  if (rs.confidence == 1) {
+    return true;
+  }
+  return false;
+}
+
+common.parseVersion = function (versionNo) {
+  var version = '0';
+  var data = null;
+  if (data = versionNo.match(/^([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})$/)) {
+    // "1.2.3"
+    version = data[1] + _.padStart(data[2], 5, '0') + _.padStart(data[3], 10, '0');
+  } else if (data = versionNo.match(/^([0-9]{1,3}).([0-9]{1,5})$/)) {
+    // "1.2"
+    version = data[1] + _.padStart(data[2], 5, '0') + _.padStart('0', 10, '0');
+  }
+  return version;
+};
+
+common.validatorVersion = function (versionNo) {
+  var flag = false;
+  var min = '0';
+  var max = '9999999999999999999';
+  var data = null;
+  if (versionNo == "*") {
+    // "*"
+    flag = true;
+  } else if (data = versionNo.match(/^([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})$/)) {
+    // "1.2.3"
+    flag = true;
+    min = data[1] + _.padStart(data[2], 5, '0') + _.padStart(data[3], 10, '0');
+    max = data[1] + _.padStart(data[2], 5, '0') + _.padStart((parseInt(data[3])+1), 10, '0');
+  } else if (data = versionNo.match(/^([0-9]{1,3}).([0-9]{1,5})(\.\*){0,1}$/)) {
+    // "1.2" "1.2.*"
+    flag = true;
+    min = data[1] + _.padStart(data[2], 5, '0') + _.padStart('0', 10, '0');
+    max = data[1] + _.padStart((parseInt(data[2])+1), 5, '0') + _.padStart('0', 10, '0');
+  } else if (data = versionNo.match(/^\~([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})$/)) {
+    //"~1.2.3"
+    flag = true;
+    min = data[1] + _.padStart(data[2], 5, '0') + _.padStart(data[3], 10, '0');
+    max = data[1] + _.padStart((parseInt(data[2])+1), 5, '0') + _.padStart('0', 10, '0');
+  } else if (data = versionNo.match(/^\^([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})$/)) {
+    //"^1.2.3"
+    flag = true;
+    min = data[1] + _.padStart(data[2], 5, '0') + _.padStart(data[3], 10, '0');
+    max = _.toString((parseInt(data[1])+1)) + _.padStart(0, 5, '0') + _.padStart('0', 10, '0');
+  } else if (data = versionNo.match(/^([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})-([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})$/)) {
+    // "1.2.3-1.2.7"
+    flag = true;
+    min = data[1] + _.padStart(data[2], 5, '0') + _.padStart(data[3], 10, '0');
+    max = data[4] + _.padStart(data[5], 5, '0') + _.padStart((parseInt(data[6])+1), 10, '0');
+  } else if (data = versionNo.match(/^>=([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})<([0-9]{1,3}).([0-9]{1,5}).([0-9]{1,10})$/)) {
+    //">=1.2.3<1.2.7"
+    flag = true;
+    min = data[1] + _.padStart(data[2], 5, '0') + _.padStart(data[3], 10, '0');
+    max = data[4] + _.padStart(data[5], 5, '0') + _.padStart(data[6], 10, '0');
+  }
+  return [flag, min, max];
+};
 
 common.createFileFromRequest = function (url, filePath) {
   return new Promise((resolve, reject) => {
@@ -41,11 +111,29 @@ common.createFileFromRequest = function (url, filePath) {
       }
     });
   });
-}
+};
+
+common.copySync = function (sourceDst, targertDst) {
+  return fsextra.copySync(sourceDst, targertDst, {overwrite: true});
+};
+
+common.copy = function (sourceDst, targertDst) {
+  return new Promise((resolve, reject) => {
+    fsextra.copy(sourceDst, targertDst, {overwrite: true}, function (err) {
+      if (err) {
+        log.error(err);
+        reject(err);
+      } else {
+        log.debug(`copy success sourceDst:${sourceDst} targertDst:${targertDst}`);
+        resolve();
+      }
+    });
+  });
+};
 
 common.move = function (sourceDst, targertDst) {
   return new Promise((resolve, reject) => {
-    fsextra.move(sourceDst, targertDst, {clobber: true, limit: 16}, function (err) {
+    fsextra.move(sourceDst, targertDst, {overwrite: true}, function (err) {
       if (err) {
         log.error(err);
         reject(err);
@@ -128,14 +216,19 @@ common.getUploadTokenQiniu = function (mac, bucket, key) {
 };
 
 common.uploadFileToStorage = function (key, filePath) {
-  if (_.get(config, 'common.storageType') === 'local') {
+  var storageType = _.get(config, 'common.storageType');
+  if ( storageType === 'local') {
     return common.uploadFileToLocal(key, filePath);
-  } else if (_.get(config, 'common.storageType') === 's3') {
+  } else if (storageType === 's3') {
     return common.uploadFileToS3(key, filePath);
-  } else if (_.get(config, 'common.storageType') === 'oss') {
+  } else if (storageType === 'oss') {
     return common.uploadFileToOSS(key, filePath);
+  } else if (storageType === 'qiniu') {
+    return common.uploadFileToQiniu(key, filePath);
+  } else if (storageType === 'tencentcloud') {
+    return common.uploadFileToTencentCloud(key, filePath);
   }
-  return common.uploadFileToQiniu(key, filePath);
+  throw new AppError.AppError(`${storageType} storageType does not support.`);
 };
 
 common.uploadFileToLocal = function (key, filePath) {
@@ -157,8 +250,8 @@ common.uploadFileToLocal = function (key, filePath) {
       throw new AppError.AppError(e.message);
     }
     var subDir = key.substr(0, 2).toLowerCase();
-    var finalDir = `${storageDir}/${subDir}`;
-    var fileName = `${finalDir}/${key}`;
+    var finalDir = path.join(storageDir, subDir);
+    var fileName = path.join(finalDir, key);
     if (fs.existsSync(fileName)) {
       return resolve(key);
     }
@@ -305,15 +398,40 @@ common.uploadFileToOSS = function (key, filePath) {
 
   return new Promise((resolve, reject) => {
     upload.on('error', (error) => {
+      log.debug("uploadFileToOSS", error);
       reject(error);
     });
 
     upload.on('uploaded', (details) => {
+      log.debug("uploadFileToOSS", details);
       resolve(details.ETag);
     });
     fs.createReadStream(filePath).pipe(upload);
   });
 };
+
+common.uploadFileToTencentCloud = function (key, filePath) {
+  return new Promise((resolve, reject) => {
+    var COS = require('cos-nodejs-sdk-v5');
+    var cosIn = new COS({
+        SecretId: _.get(config, 'tencentcloud.accessKeyId'),
+        SecretKey: _.get(config, 'tencentcloud.secretAccessKey')
+    });
+    cosIn.sliceUploadFile({
+        Bucket: _.get(config, 'tencentcloud.bucketName'),
+        Region: _.get(config, 'tencentcloud.region'),
+        Key: key,
+        FilePath: filePath
+    }, function (err, data) {
+      log.debug("uploadFileToTencentCloud", err, data);
+      if (err) {
+        reject(new AppError.AppError(JSON.stringify(err)));
+      }else {
+        resolve(data.Key);
+      }
+    });
+  });
+}
 
 common.diffCollectionsSync = function (collection1, collection2) {
   var diffFiles = [];

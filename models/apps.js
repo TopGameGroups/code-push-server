@@ -10,6 +10,9 @@ module.exports = function(sequelize, DataTypes) {
     },
     name: DataTypes.STRING,
     uid: DataTypes.BIGINT(20),
+    os: DataTypes.INTEGER(3),
+    platform: DataTypes.INTEGER(3),
+    is_use_diff_text: DataTypes.INTEGER(3),
     created_at: DataTypes.DATE,
     updated_at: DataTypes.DATE,
   }, {

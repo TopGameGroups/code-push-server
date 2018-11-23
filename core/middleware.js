@@ -17,8 +17,9 @@ var checkAuthToken = function (authToken) {
     if (_.isEmpty(users)) {
       throw new AppError.Unauthorized();
     }
+    var Sequelize = require('sequelize');
     return models.UserTokens.findOne({
-      where: {tokens: authToken, uid: users.id, expires_at: { gt: moment().format('YYYY-MM-DD HH:mm:ss') }}
+      where: {tokens: authToken, uid: users.id, expires_at: { [Sequelize.Op.gt]: moment().format('YYYY-MM-DD HH:mm:ss') }}
     })
     .then((tokenInfo) => {
       if (_.isEmpty(tokenInfo)){
@@ -34,7 +35,7 @@ var checkAuthToken = function (authToken) {
 var checkAccessToken = function (accessToken) {
   return new Promise((resolve, reject) => {
     if (_.isEmpty(accessToken)) {
-      throw new AppError.Unauthorized();
+      return reject(new AppError.Unauthorized());
     }
     var config = require('../core/config');
     var tokenSecret = _.get(config, 'jwt.tokenSecret');
@@ -42,7 +43,7 @@ var checkAccessToken = function (accessToken) {
     try {
       var authData = jwt.verify(accessToken, tokenSecret);
     } catch (e) {
-      reject(new AppError.Unauthorized());
+      return reject(new AppError.Unauthorized());
     }
     var uid = _.get(authData, 'uid', null);
     var hash = _.get(authData, 'hash', null);
@@ -73,18 +74,19 @@ middleware.checkToken = function(req, res, next) {
   var authType = 1;
   var authToken = null;
   if (_.eq(authArr[0], 'Bearer')) {
-    authType = 1;
     authToken = authArr[1]; //Bearer
+    if (authToken && authToken.length > 64) {
+      authType = 2;
+    } else {
+      authType = 1;
+    }
   } else if(_.eq(authArr[0], 'Basic')) {
     authType = 2;
     var b = new Buffer(authArr[1], 'base64');
     var user = _.split(b.toString(), ':');
     authToken = _.get(user, '1');
-  } else {
-    authType = 2;
-    authToken = _.trim(_.trimStart(_.get(req, 'query.access_token', null)));
   }
-  if (authType == 1) {
+  if (authToken && authType == 1) {
     checkAuthToken(authToken)
     .then((users) => {
       req.users = users;
@@ -98,7 +100,7 @@ middleware.checkToken = function(req, res, next) {
         next(e);
       }
     });
-  } else if (authType == 2) {
+  } else if (authToken && authType == 2) {
     checkAccessToken(authToken)
     .then((users) => {
       req.users = users;
