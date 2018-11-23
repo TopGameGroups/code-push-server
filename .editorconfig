@@ -10,31 +10,31 @@ end_of_line = lf
 trim_trailing_whitespace = true
 
 [**.html]
-indent_size = 2
+indent_size = 4
 
 [**.jade]
-indent_size = 2
+indent_size = 4
 
 [**.json]
-indent_size = 2
+indent_size = 4
 
 [**.scss]
-indent_size = 2
+indent_size = 4
 insert_final_newline = true
 
 [**.css]
-indent_size = 2
+indent_size = 4
 insert_final_newline = true
 
 [**.md]
 trim_trailing_whitespace = false
 
 [**.js]
-indent_size = 2
+indent_size = 4
 insert_final_newline = true
 
 [**.yml]
-indent_size = 2
+indent_size = 4
 
 [Makefile]
 indent_style = tab
