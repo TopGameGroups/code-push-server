@@ -6,6 +6,15 @@
     "configurations": [
         {
             "type": "node",
+            "request": "attach",
+            "name": "Attach to Remote",
+            "address": "120.79.86.122",
+            "port": 9010,
+            "localRoot": "${workspaceFolder}/bin/www",
+            "remoteRoot": "/root/codePush/server"
+        },
+        {
+            "type": "node",
             "request": "launch",
             "name": "Launch Program",
             "program": "${workspaceFolder}/bin/www"
